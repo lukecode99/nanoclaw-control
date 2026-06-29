@@ -1,0 +1,17 @@
+{
+  "cli": {
+    "version": ">= 10.0.0"
+  },
+  "build": {
+    "production": {
+      "ios": {
+        "simulator": false,
+        "distribution": "store",
+        "credentialsSource": "local"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
