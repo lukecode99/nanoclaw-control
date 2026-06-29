@@ -30,8 +30,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router",
-      "react-native-webview"
+      "expo-router"
     ],
     "scheme": "nanoclaw-control",
     "extra": {
