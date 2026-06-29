@@ -75,6 +75,8 @@ jobs:
             DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
             PROVISIONING_PROFILE_SPECIFIER="$NANOCLAW_PROVISION_NAME" \
             CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="iPhone Distribution" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/build.keychain" \
             archive
 
       - name: Export IPA
