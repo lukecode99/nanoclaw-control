@@ -67,8 +67,8 @@ jobs:
           IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           NANOCLAW_PROVISION_NAME: ${{ secrets.NANOCLAW_PROVISION_NAME }}
         run: |
-          xcodebuild -workspace ios/nanoclawcontrol.xcworkspace \
-            -scheme nanoclawcontrol \
+          xcodebuild -workspace ios/NanoClawControl.xcworkspace \
+            -scheme NanoClawControl \
             -configuration Release \
             -destination generic/platform=iOS \
             -archivePath $RUNNER_TEMP/NanoclawControl.xcarchive \
