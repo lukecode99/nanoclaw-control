@@ -9,6 +9,8 @@ on:
       - 'App.tsx'
       - 'app.json'
       - 'package.json'
+      - 'metro.config.js'
+      - 'babel.config.js'
       - '.github/workflows/ios.yml'
   workflow_dispatch:
 
