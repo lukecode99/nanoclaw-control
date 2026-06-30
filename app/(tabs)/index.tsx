@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,57 +9,102 @@ import {
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
+const WORKER_URL = 'https://nano-worker.nanoluke521.workers.dev';
+const POLL_INTERVAL = 4000;
+
 type Message = {
   id: string;
-  text: string;
   sender: 'user' | 'nano';
-  time: string;
+  content: string;
+  timestamp: string;
 };
 
-const MOCK_MESSAGES: Message[] = [
-  {
-    id: '1',
-    sender: 'nano',
-    text: 'Hello! I\'m Nano, your AI assistant. How can I help you today?',
-    time: '12:41 PM',
-  },
-  {
-    id: '2',
-    sender: 'user',
-    text: 'Can you check the latest trades on IG?',
-    time: '12:42 PM',
-  },
-  {
-    id: '3',
-    sender: 'nano',
-    text: 'Sure — pulling your IG positions now. I\'ll report back in a moment.',
-    time: '12:42 PM',
-  },
-  {
-    id: '4',
-    sender: 'nano',
-    text: 'Done. You have 3 open positions: BTCUSD (+1.2%), EURUSD (-0.3%), and AAPL (+0.8%). Total P&L today: +£142.',
-    time: '12:43 PM',
-  },
-];
-
 export default function ChatScreen() {
-  const [messages, setMessages] = useState<Message[]>(MOCK_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const flatListRef = useRef<FlatList>(null);
+  const lastTimestampRef = useRef<string | null>(null);
 
-  const sendMessage = () => {
-    if (!input.trim()) return;
-    const newMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'user',
-      text: input.trim(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    setMessages(prev => [...prev, newMsg]);
+  const fetchMessages = useCallback(async () => {
+    try {
+      const res = await fetch(`${WORKER_URL}/messages`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { messages: Message[] };
+      const msgs = data.messages || [];
+      setMessages(msgs);
+      if (msgs.length > 0) {
+        lastTimestampRef.current = msgs[msgs.length - 1].timestamp;
+      }
+      setError(null);
+    } catch (err) {
+      setError('Could not load messages. Retrying…');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMessages();
+    const interval = setInterval(fetchMessages, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchMessages]);
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [messages.length]);
+
+  const sendMessage = async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+
     setInput('');
+    setSending(true);
+
+    // Optimistic update
+    const optimisticId = `optimistic-${Date.now()}`;
+    const optimistic: Message = {
+      id: optimisticId,
+      sender: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, optimistic]);
+
+    try {
+      const res = await fetch(`${WORKER_URL}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Refresh messages to get server-confirmed version
+      await fetchMessages();
+    } catch (err) {
+      // Remove optimistic message on failure
+      setMessages(prev => prev.filter(m => m.id !== optimisticId));
+      setError('Failed to send message');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const formatTime = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return '';
+    }
   };
 
   const renderItem = ({ item }: { item: Message }) => (
@@ -67,8 +112,8 @@ export default function ChatScreen() {
       {item.sender === 'nano' && (
         <Text style={styles.senderLabel}>Nano</Text>
       )}
-      <Text style={styles.messageText}>{item.text}</Text>
-      <Text style={styles.timeText}>{item.time}</Text>
+      <Text style={styles.messageText}>{item.content}</Text>
+      <Text style={styles.timeText}>{formatTime(item.timestamp)}</Text>
     </View>
   );
 
@@ -79,12 +124,32 @@ export default function ChatScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={88}
       >
-        <FlatList
-          data={messages}
-          keyExtractor={item => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.messageList}
-        />
+        {loading ? (
+          <View style={styles.centered}>
+            <ActivityIndicator size="large" color="#00d4ff" />
+            <Text style={styles.loadingText}>Connecting to Nano…</Text>
+          </View>
+        ) : (
+          <>
+            {error && (
+              <View style={styles.errorBanner}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            )}
+            <FlatList
+              ref={flatListRef}
+              data={messages}
+              keyExtractor={item => item.id}
+              renderItem={renderItem}
+              contentContainerStyle={styles.messageList}
+              ListEmptyComponent={
+                <View style={styles.centered}>
+                  <Text style={styles.emptyText}>No messages yet. Say hello to Nano!</Text>
+                </View>
+              }
+            />
+          </>
+        )}
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
@@ -95,9 +160,14 @@ export default function ChatScreen() {
             returnKeyType="send"
             onSubmitEditing={sendMessage}
             multiline
+            editable={!sending}
           />
-          <TouchableOpacity style={styles.sendBtn} onPress={sendMessage}>
-            <Ionicons name="arrow-up-circle" size={36} color="#00d4ff" />
+          <TouchableOpacity style={styles.sendBtn} onPress={sendMessage} disabled={sending}>
+            {sending ? (
+              <ActivityIndicator size="small" color="#00d4ff" />
+            ) : (
+              <Ionicons name="arrow-up-circle" size={36} color="#00d4ff" />
+            )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -108,6 +178,17 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0a' },
   flex: { flex: 1 },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  loadingText: { color: '#555', marginTop: 12, fontSize: 14 },
+  emptyText: { color: '#555', fontSize: 14, textAlign: 'center' },
+  errorBanner: {
+    backgroundColor: '#2a0a0a',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#5a1a1a',
+  },
+  errorText: { color: '#ff6b6b', fontSize: 13 },
   messageList: { padding: 16, gap: 12 },
   bubble: {
     maxWidth: '80%',
