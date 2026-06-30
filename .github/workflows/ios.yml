@@ -16,7 +16,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
 
     steps:
@@ -24,17 +24,15 @@ jobs:
 
       - name: Select latest Xcode
         run: |
-          # Pick newest Xcode version available on this runner
           XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
           echo "Using: $XCODE_PATH"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
-          # Require iOS 26 SDK for App Store upload
           SDK=$(xcodebuild -showsdks 2>/dev/null | grep iphoneos | tail -1 | grep -oE '[0-9]+\.[0-9]+')
           MAJOR=$(echo "$SDK" | cut -d. -f1)
           echo "iOS SDK: $SDK (major: $MAJOR)"
           if [ "$MAJOR" -lt 26 ]; then
-            echo "::error::This runner has iOS $SDK SDK. Apple requires iOS 26+. Re-run to get a different runner."
+            echo "::error::This runner has iOS $SDK SDK. Apple requires iOS 26+."
             exit 1
           fi
 
@@ -44,7 +42,7 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Install Expo CLI
         run: npm install -g expo-cli @expo/cli eas-cli
@@ -67,10 +65,15 @@ jobs:
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
           echo "$IOS_P12_BASE64" | base64 --decode > $P12_PATH
           security create-keychain -p "" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security default-keychain -s $KEYCHAIN_PATH
           security unlock-keychain -p "" $KEYCHAIN_PATH
-          security import $P12_PATH -P "$IOS_P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+          security set-keychain-settings -t 10800 $KEYCHAIN_PATH
+          security import $P12_PATH \
+            -k $KEYCHAIN_PATH \
+            -P "$IOS_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/xcodebuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" $KEYCHAIN_PATH
 
       - name: Expo prebuild (generate native iOS project)
         run: npx expo prebuild --platform ios --no-install
@@ -85,6 +88,7 @@ jobs:
           IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           NANOCLAW_PROVISION_NAME: ${{ secrets.NANOCLAW_PROVISION_NAME }}
         run: |
+          security unlock-keychain -p "" $RUNNER_TEMP/build.keychain
           xcodebuild -workspace ios/NanoClawControl.xcworkspace \
             -scheme NanoClawControl \
             -configuration Release \
