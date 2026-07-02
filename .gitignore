@@ -1,0 +1,17 @@
+# Expo / React Native
+node_modules/
+.expo/
+dist/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+.env
+.env.local
+
+# Browser relay credentials — contains API tokens, must NOT be committed
+# (this repo is public)
+constants/relay.ts
