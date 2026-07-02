@@ -1,19 +1,14 @@
 // constants/relay.ts
 //
-// ⚠️  DO NOT COMMIT — this file is gitignored.
-//    It contains credentials. Fill in values on each device after cloning.
+// This file is committed to the repo with placeholder values so CI builds succeed.
+// Fill in real values on each device / in your local environment before use.
 //
 // SSL REQUIRED: iOS App Transport Security blocks plain HTTP on non-localhost.
-// The NanoClaw webhook server at lukenano.duckdns.org:3000 must be fronted by
-// an nginx SSL proxy or Cloudflare tunnel BEFORE this will work on a real device.
-//
-// Placeholder URL (update once SSL is in place):
-//   https://lukenano.duckdns.org/webhook/browser-relay   (via nginx/443 proxy → :3000)
-//   OR
-//   https://<tunnel>.trycloudflare.com/webhook/browser-relay
+// lukenano.duckdns.org:3000 must be fronted by an nginx SSL proxy or Cloudflare
+// tunnel before this will work on a real device.
 
 export const RELAY_BASE_URL = 'https://lukenano.duckdns.org/webhook/browser-relay';
 
-// Set BROWSER_RELAY_APP_TOKEN env var on the NanoClaw server, then paste the
-// same value here.
-export const APP_TOKEN = 'REPLACE_WITH_BROWSER_RELAY_APP_TOKEN';
+// Set BROWSER_RELAY_APP_TOKEN on the NanoClaw server; paste the same value here.
+// Leave empty to skip auth (dev only).
+export const APP_TOKEN = '';
