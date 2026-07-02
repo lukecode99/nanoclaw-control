@@ -12,6 +12,5 @@ web-build/
 .env
 .env.local
 
-# Browser relay credentials — contains API tokens, must NOT be committed
-# (this repo is public)
-constants/relay.ts
+# Local secret override for relay credentials (gitignored — never commit)
+constants/relay.secret.ts
