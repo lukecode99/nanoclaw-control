@@ -1,11 +1,10 @@
 /**
- * Browser relay screen — mirrors a live browser-bot session to the iOS app.
+ * Browser screen — "Bots" mode mirrors IG browser-bot sessions;
+ * "My Browser" mode lets Nano drive the phone's WKWebView remotely.
  *
- * Requires constants/relay.ts (gitignored) with RELAY_BASE_URL and APP_TOKEN.
- *
- * NOTE: RELAY_BASE_URL must be HTTPS. The NanoClaw webhook server at
- * lukenano.duckdns.org:3000 needs an SSL proxy (nginx / Cloudflare tunnel)
- * before this will work on a real device due to iOS App Transport Security.
+ * Requires constants/relay.ts with RELAY_BASE_URL (Tailscale URL) and APP_TOKEN.
+ * "My Browser" settings (relay URL + token) are stored in expo-secure-store
+ * and editable via the gear icon.
  */
 import { Ionicons } from '@expo/vector-icons';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -13,15 +12,24 @@ import {
   ActivityIndicator,
   GestureResponderEvent,
   Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import WebView, { WebViewMessageEvent } from 'react-native-webview';
+import { useKeepAwake } from 'expo-keep-awake';
+import * as SecureStore from 'expo-secure-store';
 
 import { APP_TOKEN, RELAY_BASE_URL } from '../../constants/relay';
+
+// ─── Types: Bots mode ──────────────────────────────────────────────────────
 
 interface BotInfo {
   name: string;
@@ -41,26 +49,56 @@ interface BotState {
   lastSeen: number;
 }
 
+// ─── Types: My Browser mode ────────────────────────────────────────────────
+
+interface RelayCmd {
+  id: string;
+  type: string;
+  url?: string;
+  code?: string;
+  as?: 'base64' | 'text';
+}
+
+interface LogEntry {
+  id: string;
+  type: string;
+  ok: boolean | null;
+  ts: number;
+}
+
+type BrowserStatus = 'disconnected' | 'connected' | 'serving';
+
+type PendingCmd = {
+  resolve: (data: unknown) => void;
+  reject: (err: Error) => void;
+  chunks?: Array<string | undefined>;
+  total?: number;
+};
+
+// ─── Bots mode helpers ─────────────────────────────────────────────────────
+
 const POLL_INTERVAL_MS = 800;
 const BOTS_REFRESH_MS = 3000;
 
-const AUTH_HEADERS: Record<string, string> = APP_TOKEN
+const BOT_AUTH: Record<string, string> = APP_TOKEN
   ? { Authorization: `Bearer ${APP_TOKEN}` }
   : {};
 
-async function relayGet(path: string): Promise<Response> {
-  return fetch(`${RELAY_BASE_URL}${path}`, { headers: AUTH_HEADERS });
+async function botsGet(path: string): Promise<Response> {
+  return fetch(`${RELAY_BASE_URL}${path}`, { headers: BOT_AUTH });
 }
 
-async function relayPost(path: string, body: unknown): Promise<Response> {
+async function botsPost(path: string, body: unknown): Promise<Response> {
   return fetch(`${RELAY_BASE_URL}${path}`, {
     method: 'POST',
-    headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+    headers: { ...BOT_AUTH, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 }
 
-export default function BrowserScreen() {
+// ─── Bots mode content ─────────────────────────────────────────────────────
+
+function BotsContent() {
   const [bots, setBots] = useState<BotInfo[]>([]);
   const [selectedBot, setSelectedBot] = useState<string | null>(null);
   const [botState, setBotState] = useState<BotState | null>(null);
@@ -74,7 +112,7 @@ export default function BrowserScreen() {
   useEffect(() => {
     const fetchBots = async () => {
       try {
-        const res = await relayGet('/bots');
+        const res = await botsGet('/bots');
         if (!res.ok) return;
         const data: BotInfo[] = await res.json();
         setBots(data);
@@ -108,7 +146,7 @@ export default function BrowserScreen() {
 
     const poll = async () => {
       try {
-        const res = await relayGet(`/poll/${selectedBot}`);
+        const res = await botsGet(`/poll/${selectedBot}`);
         if (res.ok) {
           const data: BotState = await res.json();
           setBotState(data);
@@ -135,9 +173,9 @@ export default function BrowserScreen() {
     async (cmd: { type: string; x?: number; y?: number }) => {
       if (!selectedBot) return;
       try {
-        await relayPost(`/cmd/${selectedBot}`, cmd);
+        await botsPost(`/cmd/${selectedBot}`, cmd);
       } catch {
-        // swallow — bot will catch it on next poll
+        // swallow
       }
     },
     [selectedBot],
@@ -146,8 +184,7 @@ export default function BrowserScreen() {
   const handleTogglePause = () => {
     if (!botState) return;
     sendCommand({ type: botState.isPaused ? 'resume' : 'pause' });
-    // Optimistic update
-    setBotState(prev => prev ? { ...prev, isPaused: !prev.isPaused } : prev);
+    setBotState(prev => (prev ? { ...prev, isPaused: !prev.isPaused } : prev));
   };
 
   const handleImageTap = (e: GestureResponderEvent) => {
@@ -165,8 +202,7 @@ export default function BrowserScreen() {
     : null;
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* ── Bot picker ── */}
+    <>
       <View style={styles.pickerBar}>
         <ScrollView
           horizontal
@@ -183,7 +219,9 @@ export default function BrowserScreen() {
                 onPress={() => setSelectedBot(bot.name)}
                 activeOpacity={0.7}
               >
-                <View style={[styles.botDot, bot.isPaused ? styles.dotPaused : styles.dotActive]} />
+                <View
+                  style={[styles.botDot, bot.isPaused ? styles.dotPaused : styles.dotActive]}
+                />
                 <Text
                   style={[
                     styles.botChipText,
@@ -198,7 +236,6 @@ export default function BrowserScreen() {
         </ScrollView>
       </View>
 
-      {/* ── Screenshot view ── */}
       <View style={styles.screenView}>
         {!selectedBot ? (
           <View style={styles.emptyState}>
@@ -241,7 +278,6 @@ export default function BrowserScreen() {
         )}
       </View>
 
-      {/* ── URL bar + controls ── */}
       <View style={styles.controlBar}>
         <View style={styles.urlRow}>
           <Ionicons name="globe-outline" size={13} color="#555" />
@@ -264,20 +300,498 @@ export default function BrowserScreen() {
               size={14}
               color={botState?.isPaused ? '#0a0a0a' : '#00d4ff'}
             />
-            <Text style={[styles.pauseBtnText, botState?.isPaused && styles.pauseBtnTextActive]}>
+            <Text
+              style={[styles.pauseBtnText, botState?.isPaused && styles.pauseBtnTextActive]}
+            >
               {botState?.isPaused ? 'Resume' : 'Pause'}
             </Text>
           </TouchableOpacity>
         </View>
       </View>
+    </>
+  );
+}
+
+// ─── My Browser mode ───────────────────────────────────────────────────────
+
+const CHUNK_SIZE = 1_400_000;
+const STORE_URL_KEY = 'browser_relay_url';
+const STORE_TOKEN_KEY = 'browser_relay_token';
+
+function buildInjection(id: string, asyncExpression: string): string {
+  // Wraps an async expression in a runner that posts chunked results back via postMessage.
+  return `(async()=>{
+  const __id=${JSON.stringify(id)};
+  const __cs=${CHUNK_SIZE};
+  function __post(ok,data,err){
+    const s=ok?String(data==null?'':data):'';
+    if(ok&&s.length>__cs){
+      const tot=Math.ceil(s.length/__cs);
+      for(let i=0;i<tot;i++){
+        window.ReactNativeWebView.postMessage(JSON.stringify({__nc:true,id:__id,chunk:i,total:tot,data:s.slice(i*__cs,(i+1)*__cs)}));
+      }
+    } else {
+      window.ReactNativeWebView.postMessage(JSON.stringify({__nc:true,id:__id,ok,data:ok?s:undefined,error:err}));
+    }
+  }
+  try{const r=await(${asyncExpression});__post(true,r,undefined);}catch(e){__post(false,undefined,String(e));}
+})();true;`;
+}
+
+function fetchExpression(url: string, as: 'base64' | 'text'): string {
+  if (as === 'base64') {
+    return `(async()=>{
+  const r=await fetch(${JSON.stringify(url)},{credentials:'include'});
+  const ab=await r.arrayBuffer();
+  const b=new Uint8Array(ab);
+  let s='';
+  for(let i=0;i<b.length;i+=8192)s+=String.fromCharCode(...b.subarray(i,Math.min(i+8192,b.length)));
+  return btoa(s);
+})()`;
+  }
+  return `(async()=>{
+  const r=await fetch(${JSON.stringify(url)},{credentials:'include'});
+  return await r.text();
+})()`;
+}
+
+function BrowserContent() {
+  useKeepAwake();
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
+  const [relayToken, setRelayToken] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftUrl, setDraftUrl] = useState(RELAY_BASE_URL);
+  const [draftToken, setDraftToken] = useState('');
+
+  useEffect(() => {
+    Promise.all([
+      SecureStore.getItemAsync(STORE_URL_KEY),
+      SecureStore.getItemAsync(STORE_TOKEN_KEY),
+    ]).then(([u, t]) => {
+      if (u) { setRelayUrl(u); setDraftUrl(u); }
+      if (t !== null) { setRelayToken(t); setDraftToken(t); }
+    });
+  }, []);
+
+  const saveSettings = async () => {
+    await Promise.all([
+      SecureStore.setItemAsync(STORE_URL_KEY, draftUrl.trim()),
+      SecureStore.setItemAsync(STORE_TOKEN_KEY, draftToken.trim()),
+    ]);
+    setRelayUrl(draftUrl.trim());
+    setRelayToken(draftToken.trim());
+    setSettingsOpen(false);
+  };
+
+  // ── Phone relay helpers ───────────────────────────────────────────────────
+
+  const phoneGet = useCallback(
+    (path: string, signal?: AbortSignal) =>
+      fetch(`${relayUrl}${path}`, {
+        headers: relayToken ? { Authorization: `Bearer ${relayToken}` } : {},
+        signal,
+      }),
+    [relayUrl, relayToken],
+  );
+
+  const phonePost = useCallback(
+    (path: string, body: unknown) =>
+      fetch(`${relayUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(relayToken ? { Authorization: `Bearer ${relayToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    [relayUrl, relayToken],
+  );
+
+  // ── WebView state ─────────────────────────────────────────────────────────
+  const webRef = useRef<WebView>(null);
+  const [webUrl, setWebUrl] = useState('about:blank');
+  const [currentUrl, setCurrentUrl] = useState('about:blank');
+  const [currentTitle, setCurrentTitle] = useState('');
+  // Refs mirror currentUrl/Title so executeCommand stays referentially stable —
+  // if it depended on the state, every navigate would tear down the polling
+  // loop mid-command and the result would never be posted back.
+  const currentUrlRef = useRef('about:blank');
+  const currentTitleRef = useRef('');
+  const navigatePendingRef = useRef<{
+    resolve: (r: unknown) => void;
+    reject: (e: Error) => void;
+  } | null>(null);
+  const pendingCmds = useRef(new Map<string, PendingCmd>());
+
+  const handleLoadEnd = useCallback((e: { nativeEvent: { url: string; title?: string } }) => {
+    const { url, title } = e.nativeEvent;
+    setCurrentUrl(url);
+    setCurrentTitle(title ?? '');
+    currentUrlRef.current = url;
+    currentTitleRef.current = title ?? '';
+    if (navigatePendingRef.current) {
+      navigatePendingRef.current.resolve({ url, title: title ?? '' });
+      navigatePendingRef.current = null;
+    }
+  }, []);
+
+  const handleMessage = useCallback((e: WebViewMessageEvent) => {
+    let msg: Record<string, unknown>;
+    try { msg = JSON.parse(e.nativeEvent.data); } catch { return; }
+    if (!msg.__nc) return;
+
+    const id = msg.id as string;
+    const pending = pendingCmds.current.get(id);
+    if (!pending) return;
+
+    if (msg.chunk !== undefined) {
+      const chunk = msg.chunk as number;
+      const total = msg.total as number;
+      if (!pending.chunks) {
+        pending.chunks = new Array(total).fill(undefined);
+        pending.total = total;
+      }
+      pending.chunks[chunk] = msg.data as string;
+      const filled = pending.chunks.filter(c => c !== undefined).length;
+      if (filled === pending.total) {
+        pending.resolve(pending.chunks.join(''));
+        pendingCmds.current.delete(id);
+      }
+    } else {
+      if (msg.ok) pending.resolve(msg.data);
+      else pending.reject(new Error((msg.error as string) ?? 'unknown'));
+      pendingCmds.current.delete(id);
+    }
+  }, []);
+
+  function injectAndWait(id: string, script: string, timeoutMs = 30_000): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      pendingCmds.current.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (pendingCmds.current.has(id)) {
+          pendingCmds.current.delete(id);
+          reject(new Error('timeout'));
+        }
+      }, timeoutMs);
+      // wrap resolve/reject to clear timer
+      const entry = pendingCmds.current.get(id)!;
+      const origResolve = entry.resolve;
+      const origReject = entry.reject;
+      entry.resolve = (v) => { clearTimeout(timer); origResolve(v); };
+      entry.reject = (e) => { clearTimeout(timer); origReject(e); };
+      webRef.current?.injectJavaScript(script);
+    });
+  }
+
+  // ── Command executor ──────────────────────────────────────────────────────
+  const executeCommand = useCallback(
+    async (cmd: RelayCmd): Promise<{ ok: boolean; data?: unknown; error?: string }> => {
+      try {
+        switch (cmd.type) {
+          case 'navigate': {
+            const result = await new Promise<unknown>((resolve, reject) => {
+              navigatePendingRef.current = { resolve, reject };
+              setWebUrl(cmd.url ?? 'about:blank');
+              setTimeout(() => {
+                if (navigatePendingRef.current) {
+                  navigatePendingRef.current = null;
+                  reject(new Error('navigate timeout'));
+                }
+              }, 30_000);
+            });
+            return { ok: true, data: result };
+          }
+
+          case 'extractHtml': {
+            const html = await injectAndWait(
+              cmd.id,
+              buildInjection(cmd.id, 'document.documentElement.outerHTML'),
+            );
+            return { ok: true, data: html };
+          }
+
+          case 'extractText': {
+            const text = await injectAndWait(
+              cmd.id,
+              buildInjection(cmd.id, 'document.body.innerText'),
+            );
+            return { ok: true, data: text };
+          }
+
+          case 'fetch': {
+            const data = await injectAndWait(
+              cmd.id,
+              buildInjection(cmd.id, fetchExpression(cmd.url ?? '', cmd.as ?? 'text')),
+              60_000,
+            );
+            return { ok: true, data };
+          }
+
+          case 'evalJs': {
+            const result = await injectAndWait(
+              cmd.id,
+              buildInjection(cmd.id, `JSON.stringify(eval(${JSON.stringify(cmd.code ?? '')}))`),
+            );
+            return { ok: true, data: result };
+          }
+
+          case 'status':
+            return {
+              ok: true,
+              data: { url: currentUrlRef.current, title: currentTitleRef.current },
+            };
+
+          default:
+            return { ok: false, error: `unknown type: ${cmd.type}` };
+        }
+      } catch (e: unknown) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    [],
+  );
+
+  // ── Polling loop ──────────────────────────────────────────────────────────
+  const [status, setStatus] = useState<BrowserStatus>('disconnected');
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [showLog, setShowLog] = useState(false);
+
+  const addLog = useCallback((entry: LogEntry) => {
+    setLog(prev => [entry, ...prev].slice(0, 20));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const ctrl = { abort: () => {} };
+
+    async function run() {
+      // hello handshake
+      try { await phonePost('/phone/hello', { deviceName: 'Luke-iPhone' }); } catch {}
+      setStatus('connected');
+
+      while (active) {
+        const abortCtrl = new AbortController();
+        ctrl.abort = () => abortCtrl.abort();
+        try {
+          const res = await phoneGet('/phone/next-cmd?wait=25', abortCtrl.signal);
+          if (!active) break;
+          if (res.status === 204) {
+            setStatus('connected');
+            continue;
+          }
+          if (res.ok) {
+            const item: RelayCmd = await res.json();
+            if (!active) break;
+            setStatus('serving');
+            addLog({ id: item.id, type: item.type, ok: null, ts: Date.now() });
+            const result = await executeCommand(item);
+            if (!active) break;
+            addLog({ id: item.id, type: item.type, ok: result.ok, ts: Date.now() });
+            try {
+              await phonePost('/phone/result', { id: item.id, ...result });
+            } catch {}
+            setStatus('connected');
+          }
+        } catch (e: unknown) {
+          if (!active) break;
+          const isAbort = e instanceof Error && e.name === 'AbortError';
+          if (!isAbort) {
+            setStatus('disconnected');
+            await new Promise(r => setTimeout(r, 3000));
+            if (!active) break;
+            setStatus('connected');
+          }
+        }
+      }
+      setStatus('disconnected');
+    }
+
+    run();
+    return () => {
+      active = false;
+      ctrl.abort();
+    };
+  }, [relayUrl, relayToken, phoneGet, phonePost, executeCommand, addLog]);
+
+  // ── UI ────────────────────────────────────────────────────────────────────
+  const statusColor =
+    status === 'serving' ? '#f0b142' : status === 'connected' ? '#5ce28e' : '#555';
+  const statusLabel =
+    status === 'serving' ? 'serving' : status === 'connected' ? 'connected' : 'disconnected';
+
+  return (
+    <>
+      {/* Status row */}
+      <View style={styles.browserStatusRow}>
+        <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+        <Text style={[styles.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
+        <Text style={styles.browserUrl} numberOfLines={1}>
+          {currentUrl === 'about:blank' ? '' : currentUrl}
+        </Text>
+        <TouchableOpacity onPress={() => setShowLog(v => !v)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Ionicons name="list-outline" size={18} color={showLog ? '#00d4ff' : '#555'} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => { setDraftUrl(relayUrl); setDraftToken(relayToken); setSettingsOpen(true); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ marginLeft: 12 }}
+        >
+          <Ionicons name="settings-outline" size={18} color="#555" />
+        </TouchableOpacity>
+      </View>
+
+      {/* WebView */}
+      <WebView
+        ref={webRef}
+        source={{ uri: webUrl }}
+        style={styles.webView}
+        onLoadEnd={handleLoadEnd as never}
+        onMessage={handleMessage}
+        javaScriptEnabled
+        domStorageEnabled
+        allowsBackForwardNavigationGestures
+        sharedCookiesEnabled
+        thirdPartyCookiesEnabled
+      />
+
+      {/* Activity log */}
+      {showLog && (
+        <View style={styles.logPanel}>
+          <ScrollView style={styles.logScroll}>
+            {log.length === 0 ? (
+              <Text style={styles.logEmpty}>No commands yet</Text>
+            ) : (
+              log.map(entry => (
+                <View key={`${entry.id}-${entry.ts}`} style={styles.logRow}>
+                  <Text
+                    style={[
+                      styles.logDot,
+                      { color: entry.ok === null ? '#888' : entry.ok ? '#5ce28e' : '#ff4444' },
+                    ]}
+                  >
+                    ●
+                  </Text>
+                  <Text style={styles.logType}>{entry.type}</Text>
+                  <Text style={styles.logId}>{entry.id.slice(0, 8)}</Text>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Settings modal */}
+      <Modal
+        visible={settingsOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setSettingsOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.settingsModal}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <SafeAreaView style={styles.settingsInner}>
+            <View style={styles.settingsHeader}>
+              <Text style={styles.settingsTitle}>My Browser settings</Text>
+              <TouchableOpacity onPress={() => setSettingsOpen(false)}>
+                <Ionicons name="close" size={22} color="#888" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.settingsLabel}>Relay URL</Text>
+            <TextInput
+              style={styles.settingsInput}
+              value={draftUrl}
+              onChangeText={setDraftUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              placeholder="https://…/browser-relay"
+              placeholderTextColor="#444"
+            />
+
+            <Text style={styles.settingsLabel}>Phone token (APP_TOKEN)</Text>
+            <TextInput
+              style={styles.settingsInput}
+              value={draftToken}
+              onChangeText={setDraftToken}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+              placeholder="Bearer token for /phone/* endpoints"
+              placeholderTextColor="#444"
+            />
+
+            <TouchableOpacity style={styles.saveBtn} onPress={saveSettings}>
+              <Text style={styles.saveBtnText}>Save & reconnect</Text>
+            </TouchableOpacity>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
+    </>
+  );
+}
+
+// ─── Root screen ───────────────────────────────────────────────────────────
+
+type Mode = 'bots' | 'browser';
+
+export default function BrowserScreen() {
+  const [mode, setMode] = useState<Mode>('bots');
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Segmented toggle */}
+      <View style={styles.modeToggle}>
+        {(['bots', 'browser'] as const).map(m => (
+          <TouchableOpacity
+            key={m}
+            style={[styles.modeBtn, mode === m && styles.modeBtnActive]}
+            onPress={() => setMode(m)}
+            activeOpacity={0.75}
+          >
+            <Text style={[styles.modeBtnText, mode === m && styles.modeBtnTextActive]}>
+              {m === 'bots' ? 'Bots' : 'My Browser'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {mode === 'bots' ? <BotsContent /> : <BrowserContent />}
     </SafeAreaView>
   );
 }
 
+// ─── Styles ────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0a' },
 
-  // Bot picker
+  // Mode toggle
+  modeToggle: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+    height: 44,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    gap: 4,
+  },
+  modeBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  modeBtnActive: { borderColor: '#00d4ff', backgroundColor: '#001f2a' },
+  modeBtnText: { color: '#555', fontSize: 14, fontWeight: '500' },
+  modeBtnTextActive: { color: '#00d4ff' },
+
+  // Bots: picker
   pickerBar: {
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
@@ -309,7 +823,7 @@ const styles = StyleSheet.create({
   botChipText: { color: '#888', fontSize: 13, fontWeight: '500' },
   botChipTextActive: { color: '#00d4ff' },
 
-  // Screenshot area
+  // Bots: screenshot area
   screenView: { flex: 1, backgroundColor: '#111' },
   emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
   emptyText: { color: '#555', fontSize: 14 },
@@ -317,7 +831,7 @@ const styles = StyleSheet.create({
   imageTouchable: { flex: 1 },
   screenshot: { flex: 1, width: '100%', height: '100%' },
 
-  // Controls
+  // Bots: controls
   controlBar: {
     borderTopWidth: 1,
     borderTopColor: '#1a1a1a',
@@ -328,7 +842,11 @@ const styles = StyleSheet.create({
   },
   urlRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   urlText: { flex: 1, color: '#555', fontSize: 12 },
-  controlRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  controlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   titleText: { flex: 1, color: '#888', fontSize: 13, marginRight: 12 },
   pauseBtn: {
     flexDirection: 'row',
@@ -343,4 +861,69 @@ const styles = StyleSheet.create({
   pauseBtnActive: { backgroundColor: '#00d4ff', borderColor: '#00d4ff' },
   pauseBtnText: { color: '#00d4ff', fontSize: 13, fontWeight: '600' },
   pauseBtnTextActive: { color: '#0a0a0a' },
+
+  // My Browser
+  browserStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+    gap: 8,
+  },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusLabel: { fontSize: 12, fontWeight: '500', minWidth: 76 },
+  browserUrl: { flex: 1, color: '#444', fontSize: 11 },
+  webView: { flex: 1 },
+
+  // Activity log
+  logPanel: {
+    maxHeight: 160,
+    borderTopWidth: 1,
+    borderTopColor: '#1a1a1a',
+    backgroundColor: '#080808',
+  },
+  logScroll: { padding: 10 },
+  logEmpty: { color: '#444', fontSize: 12 },
+  logRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  logDot: { fontSize: 10 },
+  logType: { color: '#888', fontSize: 12, flex: 1 },
+  logId: { color: '#444', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+
+  // Settings modal
+  settingsModal: { flex: 1, backgroundColor: '#0a0a0a' },
+  settingsInner: { flex: 1, paddingHorizontal: 20 },
+  settingsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 12,
+    paddingBottom: 24,
+  },
+  settingsTitle: { color: '#ccc', fontSize: 17, fontWeight: '600' },
+  settingsLabel: { color: '#888', fontSize: 13, marginBottom: 6 },
+  settingsInput: {
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 8,
+    padding: 12,
+    color: '#ddd',
+    fontSize: 14,
+    backgroundColor: '#111',
+    marginBottom: 20,
+  },
+  saveBtn: {
+    backgroundColor: '#00d4ff',
+    borderRadius: 10,
+    padding: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  saveBtnText: { color: '#0a0a0a', fontWeight: '700', fontSize: 15 },
 });

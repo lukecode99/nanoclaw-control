@@ -1,14 +1,15 @@
 // constants/relay.ts
 //
-// This file is committed to the repo with placeholder values so CI builds succeed.
-// Fill in real values on each device / in your local environment before use.
+// Committed with placeholder values so CI builds succeed.
+// "My Browser" relay URL + token are persisted in expo-secure-store
+// and editable in the My Browser settings panel.
 //
-// SSL REQUIRED: iOS App Transport Security blocks plain HTTP on non-localhost.
-// lukenano.duckdns.org:3000 must be fronted by an nginx SSL proxy or Cloudflare
-// tunnel before this will work on a real device.
+// Transport: phone reaches relay via Tailscale HTTPS; Nano reaches it
+// directly at http://172.17.0.1:8787 (Docker bridge, no prefix needed).
 
-export const RELAY_BASE_URL = 'https://lukenano.duckdns.org/webhook/browser-relay';
+// Base URL for both Bots mode (legacy endpoints) and My Browser settings default.
+export const RELAY_BASE_URL = 'https://localhost-0.tail43651c.ts.net/browser-relay';
 
-// Set BROWSER_RELAY_APP_TOKEN on the NanoClaw server; paste the same value here.
-// Leave empty to skip auth (dev only).
+// APP_TOKEN: used by Bots mode. For My Browser, the token is stored in SecureStore.
+// Leave empty; set via the My Browser settings panel on device.
 export const APP_TOKEN = '';
