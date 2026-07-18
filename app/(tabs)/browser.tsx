@@ -7,6 +7,7 @@
  * and editable via the gear icon.
  */
 import { Ionicons } from '@expo/vector-icons';
+import { useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -378,7 +379,7 @@ function KeepAwakeActivator() {
   return null;
 }
 
-function BrowserContent() {
+function BrowserContent({ autoDiag }: { autoDiag?: string }) {
   // ── Diagnostic bisect (build 10): nothing native mounts automatically.
   // Each suspect is behind its own button — the tap that crashes names the culprit.
   const [diagKeepAwake, setDiagKeepAwake] = useState(false);
@@ -387,6 +388,14 @@ function BrowserContent() {
   // Build 12: bisect INSIDE the WebView mount — bare vs +cookie props vs full.
   const [diagWVBare, setDiagWVBare] = useState(false);
   const [diagWVProps, setDiagWVProps] = useState(false);
+
+  // CI smoke test: deep link nanoclaw-control://browser?auto=bare|props|full
+  // triggers the same diagnostics without a human tap.
+  useEffect(() => {
+    if (autoDiag === 'bare') setDiagWVBare(true);
+    else if (autoDiag === 'props') setDiagWVProps(true);
+    else if (autoDiag === 'full') setDiagWebView(true);
+  }, [autoDiag]);
 
   // ── Settings ──────────────────────────────────────────────────────────────
   const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
@@ -850,6 +859,12 @@ type Mode = 'bots' | 'browser';
 
 export default function BrowserScreen() {
   const [mode, setMode] = useState<Mode>('bots');
+  const params = useLocalSearchParams<{ auto?: string }>();
+  const autoDiag = typeof params.auto === 'string' ? params.auto : undefined;
+
+  useEffect(() => {
+    if (autoDiag) setMode('browser');
+  }, [autoDiag]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -869,7 +884,7 @@ export default function BrowserScreen() {
         ))}
       </View>
 
-      {mode === 'bots' ? <BotsContent /> : <BrowserContent />}
+      {mode === 'bots' ? <BotsContent /> : <BrowserContent autoDiag={autoDiag} />}
     </SafeAreaView>
   );
 }

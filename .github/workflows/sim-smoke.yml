@@ -1,0 +1,108 @@
+name: Simulator Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sim-smoke:
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Expo prebuild (generate native iOS project)
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build for simulator
+        run: |
+          xcodebuild -workspace ios/NanoClawControl.xcworkspace \
+            -scheme NanoClawControl \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -derivedDataPath $RUNNER_TEMP/sim \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Boot simulator, mount WebView via deep link, detect crash
+        run: |
+          set -x
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)['devices']
+          for rt, devs in sorted(d.items(), reverse=True):
+              if 'iOS' in rt:
+                  for dev in devs:
+                      if dev['name'].startswith('iPhone'):
+                          print(dev['udid']); sys.exit()
+          ")
+          echo "UDID=$UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          APP=$(find $RUNNER_TEMP/sim/Build/Products -maxdepth 2 -name "*.app" | head -1)
+          echo "APP=$APP"
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl spawn "$UDID" log stream --style compact \
+            --predicate 'process CONTAINS "NanoClawControl" OR eventMessage CONTAINS "NanoClawControl" OR eventMessage CONTAINS "RNCWebView"' \
+            > $RUNNER_TEMP/sim-log.txt 2>&1 &
+          LOGPID=$!
+          xcrun simctl launch "$UDID" com.nanoluke.nanoclawcontrol
+          sleep 15
+          echo "--- process check before deep link:"
+          pgrep -fl NanoClawControl || echo "APP NOT RUNNING BEFORE DEEP LINK"
+          xcrun simctl openurl "$UDID" "nanoclaw-control://browser?auto=bare"
+          sleep 20
+          echo "--- process check after bare WebView mount:"
+          if pgrep -fl NanoClawControl; then
+            echo "RESULT: app SURVIVED bare WebView mount on simulator"
+            # go further: full WebView
+            xcrun simctl openurl "$UDID" "nanoclaw-control://browser?auto=full"
+            sleep 20
+            if pgrep -fl NanoClawControl; then
+              echo "RESULT: app SURVIVED full WebView mount on simulator"
+            else
+              echo "RESULT: app CRASHED after FULL WebView mount"
+            fi
+          else
+            echo "RESULT: app CRASHED after BARE WebView mount"
+          fi
+          kill $LOGPID 2>/dev/null || true
+          mkdir -p $RUNNER_TEMP/crashes
+          cp ~/Library/Logs/DiagnosticReports/*.ips $RUNNER_TEMP/crashes/ 2>/dev/null || echo "no .ips crash files found"
+          ls -la ~/Library/Logs/DiagnosticReports/ 2>/dev/null || true
+          for f in $RUNNER_TEMP/crashes/*.ips; do
+            [ -e "$f" ] || continue
+            echo "===== CRASH FILE: $f ====="
+            head -c 30000 "$f"
+            echo ""
+          done
+
+      - name: Upload logs and crash reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-smoke-logs
+          path: |
+            ${{ runner.temp }}/sim-log.txt
+            ${{ runner.temp }}/crashes/
+          if-no-files-found: warn
