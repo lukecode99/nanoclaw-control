@@ -384,6 +384,9 @@ function BrowserContent() {
   const [diagKeepAwake, setDiagKeepAwake] = useState(false);
   const [diagWebView, setDiagWebView] = useState(false);
   const [diagSecure, setDiagSecure] = useState('untested');
+  // Build 12: bisect INSIDE the WebView mount — bare vs +cookie props vs full.
+  const [diagWVBare, setDiagWVBare] = useState(false);
+  const [diagWVProps, setDiagWVProps] = useState(false);
 
   // ── Settings ──────────────────────────────────────────────────────────────
   const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
@@ -672,11 +675,34 @@ function BrowserContent() {
         <TouchableOpacity style={styles.diagBtn} onPress={testSecureStore}>
           <Text style={styles.diagBtnText} numberOfLines={1}>Store: {diagSecure}</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWVBare(true)}>
+          <Text style={styles.diagBtnText}>{diagWVBare ? 'WV bare ✓' : '1. WV bare'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWVProps(true)}>
+          <Text style={styles.diagBtnText}>{diagWVProps ? 'WV props ✓' : '2. WV props'}</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWebView(true)}>
-          <Text style={styles.diagBtnText}>{diagWebView ? 'WebView ✓' : 'Test WebView'}</Text>
+          <Text style={styles.diagBtnText}>{diagWebView ? 'WV full ✓' : '3. WV full'}</Text>
         </TouchableOpacity>
       </View>
       {diagKeepAwake && <KeepAwakeActivator />}
+
+      {/* Stage 1: bare WKWebView, no props beyond source */}
+      {WebView && diagWVBare && (
+        <WebView source={{ uri: 'about:blank' }} style={styles.diagWebView} />
+      )}
+      {/* Stage 2: bare + the JS/cookie/gesture props, still no ref or handlers */}
+      {WebView && diagWVProps && (
+        <WebView
+          source={{ uri: 'about:blank' }}
+          style={styles.diagWebView}
+          javaScriptEnabled
+          domStorageEnabled
+          allowsBackForwardNavigationGestures
+          sharedCookiesEnabled
+          thirdPartyCookiesEnabled
+        />
+      )}
 
       {/* Status row */}
       <View style={styles.browserStatusRow}>
@@ -982,6 +1008,7 @@ const styles = StyleSheet.create({
   // Diagnostic bisect row
   diagRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 6,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -989,7 +1016,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#1a1a1a',
   },
   diagBtn: {
-    flex: 1,
+    flexBasis: '30%',
+    flexGrow: 1,
     borderWidth: 1,
     borderColor: '#f0b142',
     borderRadius: 8,
@@ -998,6 +1026,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   diagBtnText: { color: '#f0b142', fontSize: 11, fontWeight: '600' },
+  diagWebView: { height: 44, backgroundColor: '#111' },
 
   // Native-load error banner + route error boundary
   nativeErrorBanner: {
