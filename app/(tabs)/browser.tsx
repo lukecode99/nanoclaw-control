@@ -23,9 +23,25 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import WebView, { WebViewMessageEvent } from 'react-native-webview';
-import { useKeepAwake } from 'expo-keep-awake';
-import * as SecureStore from 'expo-secure-store';
+// Native modules loaded defensively: Metro inline-requires defers module
+// evaluation to first render of this screen, so a broken native module throws
+// on tab/segment tap rather than at launch (builds 6-8 hard-crashed here).
+// Capture the error and surface it on-screen instead of dying.
+type WebViewMessageEvent = { nativeEvent: { data: string } };
+let nativeLoadError: string | null = null;
+function noteLoadError(mod: string, e: unknown) {
+  const msg = `${mod}: ${e instanceof Error ? e.message : String(e)}`;
+  nativeLoadError = nativeLoadError ? `${nativeLoadError} | ${msg}` : msg;
+}
+let WebView: any = null;
+let useKeepAwakeSafe: () => void = () => {};
+let SecureStore: {
+  getItemAsync(k: string): Promise<string | null>;
+  setItemAsync(k: string, v: string): Promise<void>;
+} = { getItemAsync: async () => null, setItemAsync: async () => {} };
+try { WebView = require('react-native-webview').default; } catch (e) { noteLoadError('react-native-webview', e); }
+try { useKeepAwakeSafe = require('expo-keep-awake').useKeepAwake; } catch (e) { noteLoadError('expo-keep-awake', e); }
+try { SecureStore = require('expo-secure-store'); } catch (e) { noteLoadError('expo-secure-store', e); }
 
 import { APP_TOKEN, RELAY_BASE_URL } from '../../constants/relay';
 
@@ -356,7 +372,7 @@ function fetchExpression(url: string, as: 'base64' | 'text'): string {
 }
 
 function BrowserContent() {
-  useKeepAwake();
+  useKeepAwakeSafe();
 
   // ── Settings ──────────────────────────────────────────────────────────────
   const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
@@ -410,7 +426,7 @@ function BrowserContent() {
   );
 
   // ── WebView state ─────────────────────────────────────────────────────────
-  const webRef = useRef<WebView>(null);
+  const webRef = useRef<any>(null);
   const [webUrl, setWebUrl] = useState('about:blank');
   const [currentUrl, setCurrentUrl] = useState('about:blank');
   const [currentTitle, setCurrentTitle] = useState('');
@@ -623,6 +639,12 @@ function BrowserContent() {
 
   return (
     <>
+      {nativeLoadError && (
+        <View style={styles.nativeErrorBanner}>
+          <Text style={styles.nativeErrorText}>Native module error: {nativeLoadError}</Text>
+        </View>
+      )}
+
       {/* Status row */}
       <View style={styles.browserStatusRow}>
         <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
@@ -643,18 +665,24 @@ function BrowserContent() {
       </View>
 
       {/* WebView */}
-      <WebView
-        ref={webRef}
-        source={{ uri: webUrl }}
-        style={styles.webView}
-        onLoadEnd={handleLoadEnd as never}
-        onMessage={handleMessage}
-        javaScriptEnabled
-        domStorageEnabled
-        allowsBackForwardNavigationGestures
-        sharedCookiesEnabled
-        thirdPartyCookiesEnabled
-      />
+      {WebView ? (
+        <WebView
+          ref={webRef}
+          source={{ uri: webUrl }}
+          style={styles.webView}
+          onLoadEnd={handleLoadEnd as never}
+          onMessage={handleMessage}
+          javaScriptEnabled
+          domStorageEnabled
+          allowsBackForwardNavigationGestures
+          sharedCookiesEnabled
+          thirdPartyCookiesEnabled
+        />
+      ) : (
+        <View style={[styles.webView, styles.emptyState]}>
+          <Text style={styles.emptyText}>WebView unavailable</Text>
+        </View>
+      )}
 
       {/* Activity log */}
       {showLog && (
@@ -736,6 +764,26 @@ function BrowserContent() {
 }
 
 // ─── Root screen ───────────────────────────────────────────────────────────
+
+// expo-router route-level error boundary: a render-time JS error on this screen
+// shows its message here instead of hard-crashing the app in release.
+export function ErrorBoundary({ error, retry }: { error: Error; retry: () => void }) {
+  return (
+    <SafeAreaView style={[styles.container, styles.errorBoundaryWrap]}>
+      <Text style={styles.errorBoundaryTitle}>Browser screen error</Text>
+      <ScrollView style={styles.errorBoundaryScroll}>
+        <Text style={styles.errorBoundaryText}>
+          {String(error?.message ?? error)}
+          {'\n\n'}
+          {String(error?.stack ?? '')}
+        </Text>
+      </ScrollView>
+      <TouchableOpacity style={styles.saveBtn} onPress={retry}>
+        <Text style={styles.saveBtnText}>Retry</Text>
+      </TouchableOpacity>
+    </SafeAreaView>
+  );
+}
 
 type Mode = 'bots' | 'browser';
 
@@ -895,6 +943,24 @@ const styles = StyleSheet.create({
   logDot: { fontSize: 10 },
   logType: { color: '#888', fontSize: 12, flex: 1 },
   logId: { color: '#444', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+
+  // Native-load error banner + route error boundary
+  nativeErrorBanner: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#2a1414',
+    borderBottomWidth: 1,
+    borderBottomColor: '#3a1a1a',
+  },
+  nativeErrorText: { color: '#ff6b6b', fontSize: 11 },
+  errorBoundaryWrap: { padding: 24 },
+  errorBoundaryTitle: { color: '#ff4444', fontSize: 15, fontWeight: '600', marginVertical: 12 },
+  errorBoundaryScroll: { maxHeight: 320, marginBottom: 16 },
+  errorBoundaryText: {
+    color: '#ccc',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
 
   // Settings modal
   settingsModal: { flex: 1, backgroundColor: '#0a0a0a' },
