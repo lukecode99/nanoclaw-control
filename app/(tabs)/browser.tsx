@@ -371,8 +371,19 @@ function fetchExpression(url: string, as: 'base64' | 'text'): string {
 })()`;
 }
 
-function BrowserContent() {
+// Mounted only when the KeepAwake diagnostic is enabled, so the native call
+// happens on an explicit tap rather than on segment mount.
+function KeepAwakeActivator() {
   useKeepAwakeSafe();
+  return null;
+}
+
+function BrowserContent() {
+  // ── Diagnostic bisect (build 10): nothing native mounts automatically.
+  // Each suspect is behind its own button — the tap that crashes names the culprit.
+  const [diagKeepAwake, setDiagKeepAwake] = useState(false);
+  const [diagWebView, setDiagWebView] = useState(false);
+  const [diagSecure, setDiagSecure] = useState('untested');
 
   // ── Settings ──────────────────────────────────────────────────────────────
   const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
@@ -381,21 +392,29 @@ function BrowserContent() {
   const [draftUrl, setDraftUrl] = useState(RELAY_BASE_URL);
   const [draftToken, setDraftToken] = useState('');
 
-  useEffect(() => {
-    Promise.all([
-      SecureStore.getItemAsync(STORE_URL_KEY),
-      SecureStore.getItemAsync(STORE_TOKEN_KEY),
-    ]).then(([u, t]) => {
+  const testSecureStore = async () => {
+    try {
+      const [u, t] = await Promise.all([
+        SecureStore.getItemAsync(STORE_URL_KEY),
+        SecureStore.getItemAsync(STORE_TOKEN_KEY),
+      ]);
       if (u) { setRelayUrl(u); setDraftUrl(u); }
       if (t !== null) { setRelayToken(t); setDraftToken(t); }
-    });
-  }, []);
+      setDiagSecure('ok');
+    } catch (e) {
+      setDiagSecure(`ERR ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const saveSettings = async () => {
-    await Promise.all([
-      SecureStore.setItemAsync(STORE_URL_KEY, draftUrl.trim()),
-      SecureStore.setItemAsync(STORE_TOKEN_KEY, draftToken.trim()),
-    ]);
+    try {
+      await Promise.all([
+        SecureStore.setItemAsync(STORE_URL_KEY, draftUrl.trim()),
+        SecureStore.setItemAsync(STORE_TOKEN_KEY, draftToken.trim()),
+      ]);
+    } catch {
+      // keep going — settings still apply for this session even if persist fails
+    }
     setRelayUrl(draftUrl.trim());
     setRelayToken(draftToken.trim());
     setSettingsOpen(false);
@@ -645,6 +664,20 @@ function BrowserContent() {
         </View>
       )}
 
+      {/* Diagnostic bisect row — tap each; the one that crashes is the culprit */}
+      <View style={styles.diagRow}>
+        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagKeepAwake(true)}>
+          <Text style={styles.diagBtnText}>{diagKeepAwake ? 'KeepAwake ✓' : 'Test KeepAwake'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.diagBtn} onPress={testSecureStore}>
+          <Text style={styles.diagBtnText} numberOfLines={1}>Store: {diagSecure}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWebView(true)}>
+          <Text style={styles.diagBtnText}>{diagWebView ? 'WebView ✓' : 'Test WebView'}</Text>
+        </TouchableOpacity>
+      </View>
+      {diagKeepAwake && <KeepAwakeActivator />}
+
       {/* Status row */}
       <View style={styles.browserStatusRow}>
         <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
@@ -665,7 +698,7 @@ function BrowserContent() {
       </View>
 
       {/* WebView */}
-      {WebView ? (
+      {WebView && diagWebView ? (
         <WebView
           ref={webRef}
           source={{ uri: webUrl }}
@@ -680,7 +713,9 @@ function BrowserContent() {
         />
       ) : (
         <View style={[styles.webView, styles.emptyState]}>
-          <Text style={styles.emptyText}>WebView unavailable</Text>
+          <Text style={styles.emptyText}>
+            {WebView ? 'WebView not mounted — tap Test WebView above' : 'WebView unavailable'}
+          </Text>
         </View>
       )}
 
@@ -943,6 +978,26 @@ const styles = StyleSheet.create({
   logDot: { fontSize: 10 },
   logType: { color: '#888', fontSize: 12, flex: 1 },
   logId: { color: '#444', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+
+  // Diagnostic bisect row
+  diagRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+  },
+  diagBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#f0b142',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  diagBtnText: { color: '#f0b142', fontSize: 11, fontWeight: '600' },
 
   // Native-load error banner + route error boundary
   nativeErrorBanner: {
