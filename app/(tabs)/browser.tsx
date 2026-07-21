@@ -335,6 +335,15 @@ const CHUNK_SIZE = 1_400_000;
 const STORE_URL_KEY = 'browser_relay_url';
 const STORE_TOKEN_KEY = 'browser_relay_token';
 
+// react-native-webview routes any source uri WITHOUT a host through
+// -[WKWebView loadFileURL:allowingReadAccessToURL:], which raises
+// NSInvalidArgumentException for non-file URLs — fatal on iOS 26.6+
+// (crashed builds 7-14 via uri:'about:blank'). Blank content must go
+// through the html source (loadHTMLString), and only http(s) URLs may
+// ever be passed as a uri.
+const BLANK_SOURCE = { html: '<!doctype html><html><body style="background:#111"></body></html>' };
+const isHttpUrl = (u: string) => /^https?:\/\//i.test(u);
+
 function buildInjection(id: string, asyncExpression: string): string {
   // Wraps an async expression in a runner that posts chunked results back via postMessage.
   return `(async()=>{
@@ -383,7 +392,9 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
   // ── Diagnostic bisect (build 10): nothing native mounts automatically.
   // Each suspect is behind its own button — the tap that crashes names the culprit.
   const [diagKeepAwake, setDiagKeepAwake] = useState(false);
-  const [diagWebView, setDiagWebView] = useState(false);
+  // Build 15: main WebView mounts by default again — the crash was loadFileURL:
+  // throwing on host-less URIs (see BLANK_SOURCE), not the mount itself.
+  const [diagWebView, setDiagWebView] = useState(true);
   const [diagSecure, setDiagSecure] = useState('untested');
   // Build 12: bisect INSIDE the WebView mount — bare vs +cookie props vs full.
   const [diagWVBare, setDiagWVBare] = useState(false);
@@ -458,13 +469,13 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
 
   // ── WebView state ─────────────────────────────────────────────────────────
   const webRef = useRef<any>(null);
-  const [webUrl, setWebUrl] = useState('about:blank');
-  const [currentUrl, setCurrentUrl] = useState('about:blank');
+  const [webUrl, setWebUrl] = useState('');
+  const [currentUrl, setCurrentUrl] = useState('');
   const [currentTitle, setCurrentTitle] = useState('');
   // Refs mirror currentUrl/Title so executeCommand stays referentially stable —
   // if it depended on the state, every navigate would tear down the polling
   // loop mid-command and the result would never be posted back.
-  const currentUrlRef = useRef('about:blank');
+  const currentUrlRef = useRef('');
   const currentTitleRef = useRef('');
   const navigatePendingRef = useRef<{
     resolve: (r: unknown) => void;
@@ -540,7 +551,7 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
           case 'navigate': {
             const result = await new Promise<unknown>((resolve, reject) => {
               navigatePendingRef.current = { resolve, reject };
-              setWebUrl(cmd.url ?? 'about:blank');
+              setWebUrl(cmd.url && isHttpUrl(cmd.url) ? cmd.url : '');
               setTimeout(() => {
                 if (navigatePendingRef.current) {
                   navigatePendingRef.current = null;
@@ -698,12 +709,12 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
 
       {/* Stage 1: bare WKWebView, no props beyond source */}
       {WebView && diagWVBare && (
-        <WebView source={{ uri: 'about:blank' }} style={styles.diagWebView} />
+        <WebView source={BLANK_SOURCE} style={styles.diagWebView} />
       )}
       {/* Stage 2: bare + the JS/cookie/gesture props, still no ref or handlers */}
       {WebView && diagWVProps && (
         <WebView
-          source={{ uri: 'about:blank' }}
+          source={BLANK_SOURCE}
           style={styles.diagWebView}
           javaScriptEnabled
           domStorageEnabled
@@ -718,7 +729,7 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
         <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
         <Text style={[styles.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
         <Text style={styles.browserUrl} numberOfLines={1}>
-          {currentUrl === 'about:blank' ? '' : currentUrl}
+          {currentUrl && currentUrl !== 'about:blank' ? currentUrl : ''}
         </Text>
         <TouchableOpacity onPress={() => setShowLog(v => !v)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           <Ionicons name="list-outline" size={18} color={showLog ? '#00d4ff' : '#555'} />
@@ -736,7 +747,7 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
       {WebView && diagWebView ? (
         <WebView
           ref={webRef}
-          source={{ uri: webUrl }}
+          source={webUrl && isHttpUrl(webUrl) ? { uri: webUrl } : BLANK_SOURCE}
           style={styles.webView}
           onLoadEnd={handleLoadEnd as never}
           onMessage={handleMessage}
