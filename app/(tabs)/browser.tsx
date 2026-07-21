@@ -381,32 +381,10 @@ function fetchExpression(url: string, as: 'base64' | 'text'): string {
 })()`;
 }
 
-// Mounted only when the KeepAwake diagnostic is enabled, so the native call
-// happens on an explicit tap rather than on segment mount.
-function KeepAwakeActivator() {
+function BrowserContent() {
+  // The relay can only drive the WebView while the app is foregrounded, so
+  // keep the screen awake for as long as this tab is open.
   useKeepAwakeSafe();
-  return null;
-}
-
-function BrowserContent({ autoDiag }: { autoDiag?: string }) {
-  // ── Diagnostic bisect (build 10): nothing native mounts automatically.
-  // Each suspect is behind its own button — the tap that crashes names the culprit.
-  const [diagKeepAwake, setDiagKeepAwake] = useState(false);
-  // Build 15: main WebView mounts by default again — the crash was loadFileURL:
-  // throwing on host-less URIs (see BLANK_SOURCE), not the mount itself.
-  const [diagWebView, setDiagWebView] = useState(true);
-  const [diagSecure, setDiagSecure] = useState('untested');
-  // Build 12: bisect INSIDE the WebView mount — bare vs +cookie props vs full.
-  const [diagWVBare, setDiagWVBare] = useState(false);
-  const [diagWVProps, setDiagWVProps] = useState(false);
-
-  // CI smoke test: deep link nanoclaw-control://browser?auto=bare|props|full
-  // triggers the same diagnostics without a human tap.
-  useEffect(() => {
-    if (autoDiag === 'bare') setDiagWVBare(true);
-    else if (autoDiag === 'props') setDiagWVProps(true);
-    else if (autoDiag === 'full') setDiagWebView(true);
-  }, [autoDiag]);
 
   // ── Settings ──────────────────────────────────────────────────────────────
   const [relayUrl, setRelayUrl] = useState(RELAY_BASE_URL);
@@ -415,19 +393,20 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
   const [draftUrl, setDraftUrl] = useState(RELAY_BASE_URL);
   const [draftToken, setDraftToken] = useState('');
 
-  const testSecureStore = async () => {
-    try {
-      const [u, t] = await Promise.all([
-        SecureStore.getItemAsync(STORE_URL_KEY),
-        SecureStore.getItemAsync(STORE_TOKEN_KEY),
-      ]);
-      if (u) { setRelayUrl(u); setDraftUrl(u); }
-      if (t !== null) { setRelayToken(t); setDraftToken(t); }
-      setDiagSecure('ok');
-    } catch (e) {
-      setDiagSecure(`ERR ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
+  useEffect(() => {
+    (async () => {
+      try {
+        const [u, t] = await Promise.all([
+          SecureStore.getItemAsync(STORE_URL_KEY),
+          SecureStore.getItemAsync(STORE_TOKEN_KEY),
+        ]);
+        if (u) { setRelayUrl(u); setDraftUrl(u); }
+        if (t !== null) { setRelayToken(t); setDraftToken(t); }
+      } catch {
+        // fall back to the compiled-in relay defaults
+      }
+    })();
+  }, []);
 
   const saveSettings = async () => {
     try {
@@ -640,7 +619,11 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
             continue;
           }
           if (res.ok) {
-            const item: RelayCmd = await res.json();
+            // Accept both relay shapes: flat {id, type, ...} and legacy
+            // nested {id, cmd: {type, ...}} — so a relay rollback can never
+            // silently break command dispatch again.
+            const raw = await res.json();
+            const item: RelayCmd = raw && raw.cmd ? { ...raw.cmd, id: raw.id } : raw;
             if (!active) break;
             setStatus('serving');
             addLog({ id: item.id, type: item.type, ok: null, ts: Date.now() });
@@ -687,43 +670,6 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
         </View>
       )}
 
-      {/* Diagnostic bisect row — tap each; the one that crashes is the culprit */}
-      <View style={styles.diagRow}>
-        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagKeepAwake(true)}>
-          <Text style={styles.diagBtnText}>{diagKeepAwake ? 'KeepAwake ✓' : 'Test KeepAwake'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.diagBtn} onPress={testSecureStore}>
-          <Text style={styles.diagBtnText} numberOfLines={1}>Store: {diagSecure}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWVBare(true)}>
-          <Text style={styles.diagBtnText}>{diagWVBare ? 'WV bare ✓' : '1. WV bare'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWVProps(true)}>
-          <Text style={styles.diagBtnText}>{diagWVProps ? 'WV props ✓' : '2. WV props'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.diagBtn} onPress={() => setDiagWebView(true)}>
-          <Text style={styles.diagBtnText}>{diagWebView ? 'WV full ✓' : '3. WV full'}</Text>
-        </TouchableOpacity>
-      </View>
-      {diagKeepAwake && <KeepAwakeActivator />}
-
-      {/* Stage 1: bare WKWebView, no props beyond source */}
-      {WebView && diagWVBare && (
-        <WebView source={BLANK_SOURCE} style={styles.diagWebView} />
-      )}
-      {/* Stage 2: bare + the JS/cookie/gesture props, still no ref or handlers */}
-      {WebView && diagWVProps && (
-        <WebView
-          source={BLANK_SOURCE}
-          style={styles.diagWebView}
-          javaScriptEnabled
-          domStorageEnabled
-          allowsBackForwardNavigationGestures
-          sharedCookiesEnabled
-          thirdPartyCookiesEnabled
-        />
-      )}
-
       {/* Status row */}
       <View style={styles.browserStatusRow}>
         <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
@@ -744,7 +690,7 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
       </View>
 
       {/* WebView */}
-      {WebView && diagWebView ? (
+      {WebView ? (
         <WebView
           ref={webRef}
           source={webUrl && isHttpUrl(webUrl) ? { uri: webUrl } : BLANK_SOURCE}
@@ -759,9 +705,7 @@ function BrowserContent({ autoDiag }: { autoDiag?: string }) {
         />
       ) : (
         <View style={[styles.webView, styles.emptyState]}>
-          <Text style={styles.emptyText}>
-            {WebView ? 'WebView not mounted — tap Test WebView above' : 'WebView unavailable'}
-          </Text>
+          <Text style={styles.emptyText}>WebView unavailable</Text>
         </View>
       )}
 
@@ -895,7 +839,7 @@ export default function BrowserScreen() {
         ))}
       </View>
 
-      {mode === 'bots' ? <BotsContent /> : <BrowserContent autoDiag={autoDiag} />}
+      {mode === 'bots' ? <BotsContent /> : <BrowserContent />}
     </SafeAreaView>
   );
 }
@@ -1030,29 +974,6 @@ const styles = StyleSheet.create({
   logDot: { fontSize: 10 },
   logType: { color: '#888', fontSize: 12, flex: 1 },
   logId: { color: '#444', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-
-  // Diagnostic bisect row
-  diagRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-  },
-  diagBtn: {
-    flexBasis: '30%',
-    flexGrow: 1,
-    borderWidth: 1,
-    borderColor: '#f0b142',
-    borderRadius: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-  },
-  diagBtnText: { color: '#f0b142', fontSize: 11, fontWeight: '600' },
-  diagWebView: { height: 44, backgroundColor: '#111' },
 
   // Native-load error banner + route error boundary
   nativeErrorBanner: {
